@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>阶跃星辰 · 多账号余额看板</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --panel-2: #1d212b;
+    --border: #2a2f3c;
+    --text: #e8eaf0;
+    --muted: #9aa3b5;
+    --accent: #6c8cff;
+    --green: #3ecf8e;
+    --red: #f6685e;
+    --yellow: #f4b750;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    min-height: 100vh; padding: 28px 32px 60px;
+  }
+  .topbar { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-bottom: 24px; }
+  .topbar h1 { font-size: 22px; font-weight: 600; }
+  .topbar h1 .tag { font-size: 12px; color: var(--muted); font-weight: 400; margin-left: 10px; }
+  .spacer { flex: 1; }
+  button {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 8px 16px; font-size: 14px; cursor: pointer;
+    transition: border-color .15s, background .15s;
+  }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.mini { padding: 4px 10px; font-size: 12px; }
+
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 14px; margin-bottom: 22px; }
+  .stat { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; }
+  .stat .label { font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+  .stat .value { font-size: 24px; font-weight: 600; }
+  .stat .value.green { color: var(--green); }
+  .stat .value.red { color: var(--red); }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 14px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 18px 20px; position: relative;
+  }
+  .card.err { border-color: #5c2f2c; }
+  .card .head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+  .card .name { font-size: 16px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 160px; }
+  .card .sub { font-size: 12px; color: var(--muted); background: var(--panel-2); border-radius: 6px; padding: 2px 8px; }
+  .card .del { margin-left: auto; background: none; border: none; color: var(--muted); font-size: 16px; padding: 2px 6px; }
+  .card .del:hover { color: var(--red); }
+  .card .balance { font-size: 30px; font-weight: 700; margin: 4px 0 10px; }
+  .card .balance .unit { font-size: 14px; color: var(--muted); font-weight: 400; margin-right: 4px; }
+  .delta { font-size: 13px; margin-bottom: 10px; }
+  .delta.up { color: var(--green); }
+  .delta.down { color: var(--red); }
+  .delta.flat { color: var(--muted); }
+  .split { display: flex; gap: 10px; }
+  .split .cell { flex: 1; background: var(--panel-2); border-radius: 8px; padding: 8px 10px; min-width: 0; }
+  .split .cell .k { font-size: 12px; color: var(--muted); margin-bottom: 2px; }
+  .split .cell .v { font-size: 15px; font-weight: 600; }
+  .split .cell .v small { font-size: 11px; color: var(--muted); font-weight: 400; }
+  .planbar {
+    display: flex; align-items: center; gap: 10px; margin-top: 12px;
+    background: linear-gradient(90deg, #1c2438, var(--panel-2)); border: 1px solid #2b3opac;
+    border: 1px solid #2b3650; border-radius: 8px; padding: 8px 12px; font-size: 13px;
+  }
+  .planbar .pname { font-weight: 600; color: #a7bcff; }
+  .planbar .days { color: var(--muted); }
+  .planbar .renew { margin-left: auto; font-size: 12px; color: var(--muted); }
+  .costline { display: flex; gap: 16px; margin-top: 10px; font-size: 13px; color: var(--muted); }
+  .costline b { color: var(--text); font-weight: 600; }
+  .meta { display: flex; gap: 10px; margin-top: 12px; font-size: 12px; color: var(--muted); flex-wrap: wrap; align-items: center; }
+  .badge { border-radius: 5px; padding: 1px 7px; font-size: 12px; }
+  .badge.prepaid { background: #1d3328; color: var(--green); }
+  .badge.postpaid { background: #33291d; color: var(--yellow); }
+  .badge.planon { background: #1d2a44; color: #a7bcff; }
+  .badge.fail { background: #331d1d; color: var(--red); }
+  .badge.src { background: var(--panel-2); color: var(--muted); }
+  .card .errmsg { font-size: 13px; color: var(--red); margin: 6px 0; word-break: break-all; }
+
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; margin-top: 26px; }
+  .panel h3 { font-size: 15px; margin-bottom: 12px; color: var(--muted); font-weight: 500; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  input[type=text], textarea {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 8px 12px; font-size: 14px; outline: none;
+  }
+  input[type=text]:focus, textarea:focus { border-color: var(--accent); }
+  input[type=text] { width: 220px; }
+  textarea { width: 100%; min-height: 110px; font-family: Consolas, monospace; resize: vertical; font-size: 12px; }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 8px; line-height: 1.8; }
+  .hint b { color: var(--text); font-weight: 600; }
+  label.chk { font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+  .empty { grid-column: 1 / -1; text-align: center; color: var(--muted); padding: 60px 0; font-size: 14px; border: 1px dashed var(--border); border-radius: 12px; }
+  #toast { position: fixed; bottom: 28px; left: 50%; transform: translateX(-50%); background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 10px 22px; font-size: 14px; display: none; z-index: 9; max-width: 80vw; }
+  #refreshing { position: fixed; top: 16px; right: 20px; font-size: 12px; color: var(--muted); display: none; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <h1>阶跃星辰 · 多账号余额看板 <span class="tag">官方API + 控制台双源</span></h1>
+  <div class="spacer"></div>
+  <button id="btn-refresh" class="primary">立即刷新</button>
+</div>
+
+<div class="stats">
+  <div class="stat"><div class="label">合计可用余额</div><div class="value green" id="st-total">--</div></div>
+  <div class="stat"><div class="label">账号数</div><div class="value" id="st-count">--</div></div>
+  <div class="stat"><div class="label">查询正常</div><div class="value" id="st-ok">--</div></div>
+  <div class="stat"><div class="label">本月消费合计</div><div class="value" id="st-cost">--</div></div>
+  <div class="stat"><div class="label">上次刷新</div><div class="value" id="st-time">--</div></div>
+</div>
+
+<div class="grid" id="grid"></div>
+
+<div class="panel">
+  <h3>绑定阶跃账号（能看到套餐、赠送拆分、消费、密钥）</h3>
+  <div class="hint" style="margin-bottom:10px">
+    照着下面 5 步做一次就行（大约 1 分钟）：<br>
+    ① 用你平时登录阶跃的浏览器，打开阶跃的控制台任意页面；<br>
+    ② 按键盘上的 <b>F12</b> 键（屏幕会弹出开发者工具），点上面的 <b>网络 / Network</b> 标签；<br>
+    ③ 按 <b>Ctrl+R</b> 刷新页面，左边列表会出现很多行；<br>
+    ④ 用鼠标右键点名字里带 <b>Get</b> 或 <b>Query</b> 的任意一条 → <b>复制 / Copy</b> → <b>Copy as cURL（复制为 cURL）</b>；<br>
+    ⑤ 回到本页，把复制到的一大串内容粘贴到下面框里，点「导入并验证」。
+  </div>
+  <div class="row">
+    <input type="text" id="curl-note" placeholder="给这个账号起个名（想合并到已有卡片就填那张卡的名字）">
+  </div>
+  <textarea id="curl-text" style="margin-top:10px" placeholder="把第④步复制的内容粘到这里（是一大串以 curl 开头的英文，粘对了就行，不用看懂）"></textarea>
+  <div class="row" style="margin-top:10px">
+    <button class="primary" id="btn-curl">导入并验证</button>
+    <span class="hint" style="margin-top:0">这些信息只保存在你自己电脑上；以后如果提示「会话失效」，重新做一遍这 5 步即可</span>
+  </div>
+</div>
+
+<div id="refreshing">正在刷新…</div>
+<div id="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => { const d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; };
+const fmt = v => (v == null) ? '--' : Number(v).toLocaleString('zh-CN', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+
+function toast(msg, isErr) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.style.borderColor = isErr ? 'var(--red)' : 'var(--border)';
+  t.style.display = 'block';
+  clearTimeout(t._h);
+  t._h = setTimeout(() => t.style.display = 'none', 4000);
+}
+function timeStr(ts) {
+  if (!ts) return '--';
+  const d = new Date(ts * 1000);
+  const p = n => String(n).padStart(2, '0');
+  return `${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+function dateStr(ts) {
+  if (!ts) return '';
+  const d = new Date(ts * 1000);
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}`;
+}
+function maskPhone(p) {
+  if (!p || p.length < 7) return p || '';
+  return p.slice(0,3) + '****' + p.slice(-4);
+}
+function fmtM(v) {  // credit 原始数 → "x.xxM"
+  if (v == null) return '--';
+  return (v / 1e6).toLocaleString('zh-CN', {minimumFractionDigits: 2, maximumFractionDigits: 2}) + 'M';
+}
+
+function render(data) {
+  const accounts = data.accounts || [];
+  const grid = $('grid');
+  grid.innerHTML = '';
+  if (!accounts.length) {
+    grid.innerHTML = '<div class="empty">还没有账号。导入控制台凭据（完整数据）或添加 API Key（基础余额）。</div>';
+  }
+  let total = 0, okN = 0, badN = 0, costSum = 0;
+  for (const a of accounts) {
+    if (a.ok) { okN++; total += a.balance || 0; costSum += a.cost_month || 0; } else { badN++; }
+    const card = document.createElement('div');
+    card.className = 'card' + (a.ok ? '' : ' err');
+
+    let deltaHtml = '';
+    if (a.ok && a.prev_balance != null && a.balance != null) {
+      const d = a.balance - a.prev_balance;
+      if (Math.abs(d) < 1e-9) deltaHtml = `<div class="delta flat">较上次无变化</div>`;
+      else deltaHtml = `<div class="delta ${d > 0 ? 'up' : 'down'}">较上次 ${d > 0 ? '+' : ''}${fmt(d)}</div>`;
+    }
+
+    // 赠送拆分单元格：有控制台数据时拆 API / Plan
+    let voucherCells;
+    if (a.src_console && (a.voucher_api != null || a.voucher_plan != null)) {
+      voucherCells = `
+        <div class="cell"><div class="k">充值总额</div><div class="v">¥${fmt(a.cash)}</div></div>
+        <div class="cell"><div class="k">API 赠送</div><div class="v">¥${fmt(a.voucher_api)}</div></div>
+        <div class="cell"><div class="k">Step Plan</div><div class="v">¥${fmt(a.voucher_plan)}</div></div>`;
+    } else {
+      voucherCells = `
+        <div class="cell"><div class="k">充值总额</div><div class="v">¥${fmt(a.cash)}</div></div>
+        <div class="cell"><div class="k">赠送总额</div><div class="v">¥${fmt(a.voucher)}</div></div>`;
+    }
+
+    // Plan 套餐条 + 本周期 Credit 用量
+    let planHtml = '';
+    if (a.plan_name) {
+      const days = a.plan_expire_ts ? Math.ceil((a.plan_expire_ts * 1000 - Date.now()) / 86400000) : null;
+      const daysTxt = days != null ? (days > 0 ? `剩余 ${days} 天 · ${dateStr(a.plan_expire_ts)} 到期` : '已过期') : '';
+      let creditHtml = '';
+      if (a.plan_buckets && a.plan_buckets.length) {
+        const rows = a.plan_buckets.map(b => {
+          const total = b.total || 0, left = b.residual || 0;
+          const used = total - left;
+          const pct = total > 0 ? Math.round(left / total * 100) : 0;
+          const usedPct = Math.min(100, total > 0 ? Math.round(used / total * 100) : 0);
+          const label = b.type === 1 ? '本周期' : '加油包';
+          const bar = `<div style="height:6px;background:#141821;border-radius:3px;margin:4px 0;overflow:hidden"><div style="height:100%;width:${usedPct}%;background:linear-gradient(90deg,#6c8cff,#8fa7ff);border-radius:3px"></div></div>`;
+          return `<div style="margin-top:6px">${bar}<div style="display:flex;justify-content:space-between"><span>${label}已用 <b style="color:#a7bcff">${fmtM(used)}</b> / ${fmtM(total)}</span><span style="color:var(--muted)">剩 ${pct}%${b.reset_ts ? ' · ' + timeStr(b.reset_ts).slice(0, 11) + '重置' : ''}</span></div></div>`;
+        }).join('');
+        creditHtml = rows;
+      } else if (a.plan_credit_used != null) {
+        creditHtml = `<span class="days">今日已用 ${(a.plan_credit_used/1e6).toFixed(2)}M credits</span>`;
+      }
+      planHtml = `
+        <div class="planbar" style="flex-direction:column;align-items:stretch;gap:2px">
+          <div style="display:flex;align-items:center;gap:10px">
+            <span class="pname">☰ ${esc(a.plan_name)}</span>
+            <span class="days">${daysTxt}</span>
+            <span class="renew">${a.plan_auto_renew ? '自动续费' : '不自动续费'}</span>
+          </div>
+          ${creditHtml}
+        </div>`;
+    }
+
+    // API 密钥区（完整 Key 仅在本机，提供复制按钮）
+    let keysHtml = '';
+    if (a.access_keys && a.access_keys.length) {
+      const keyRows = a.access_keys.map((k, i) => {
+        const masked = k.key.length > 12 ? k.key.slice(0, 6) + '...' + k.key.slice(-4) : k.key;
+        return `<div style="display:flex;align-items:center;gap:8px;margin-top:6px">
+          <span style="font-size:12px;color:var(--muted)">${esc(k.name || '密钥')}${k.is_default ? '·默认' : ''}</span>
+          <code style="font-size:12px;background:var(--panel-2);border-radius:5px;padding:2px 7px">${esc(masked)}</code>
+          <button class="mini" data-copy="${i}">复制</button>
+        </div>`;
+      }).join('');
+      keysHtml = `<div style="margin-top:12px;padding-top:10px;border-top:1px dashed var(--border)">
+        <div style="font-size:12px;color:var(--muted);margin-bottom:2px">接口密钥（${a.access_keys.length} 个，来自控制台）</div>${keyRows}</div>`;
+    }
+
+    // 消费行（仅控制台源有）
+    let costHtml = '';
+    if (a.src_console && (a.cost_month != null || a.cost_total != null)) {
+      costHtml = `<div class="costline"><span>本月消费 <b>¥${fmt(a.cost_month)}</b></span><span>累计 <b>¥${fmt(a.cost_total)}</b></span></div>`;
+    }
+
+    const srcBadges = [];
+    if (a.src_console) srcBadges.push('<span class="badge src">控制台</span>');
+    if (a.src_api) srcBadges.push('<span class="badge src">API Key</span>');
+
+    card.innerHTML = `
+      <div class="head">
+        <button class="del" style="margin-left:0" title="改名" data-rename="${a.id}" data-note="${esc(a.note || '')}">✎</button>
+        <span class="name" title="${esc(a.note || '未命名')}">${esc(a.note || '未命名')}</span>
+        ${a.phone ? `<span class="sub">${maskPhone(a.phone)}</span>` : ''}
+        ${a.key_tail ? `<span class="sub">${esc(a.key_tail)}</span>` : ''}
+        <button class="del" title="删除" data-id="${a.id}">✕</button>
+      </div>
+      ${a.ok ? `
+        <div class="balance"><span class="unit">¥</span>${fmt(a.balance)}</div>
+        ${deltaHtml}
+        <div class="split">${voucherCells}</div>
+        ${planHtml}
+        ${keysHtml}
+        ${costHtml}
+        <div class="meta">
+          ${a.type ? `<span class="badge ${a.type}">${a.type === 'postpaid' ? '后付费' : '预付费'}</span>` : ''}
+          ${srcBadges.join('')}
+          <span>查询于 ${timeStr(a.checked_at)}</span>
+        </div>
+        ${(a.errors || []).length ? `<div class="delta flat" style="margin-top:8px">⚠ ${esc(a.errors.join('；'))}</div>` : ''}
+      ` : `
+        <div class="errmsg">${esc((a.errors || []).join('；') || '查询失败')}</div>
+        <div class="meta"><span class="badge fail">异常</span><span>查询于 ${timeStr(a.checked_at)}</span></div>
+      `}`;
+    card.querySelector('.del[data-id]').onclick = () => removeAccount(a.id, a.note);
+    // 改名按钮
+    card.querySelector('[data-rename]').onclick = async () => {
+      const name = prompt('改成什么名字？', a.note || '');
+      if (name == null || !name.trim()) return;
+      const r = await post('/api/accounts', {action: 'rename', id: a.id, note: name.trim()});
+      if (r.error) { toast(r.error, true); return; }
+      toast(r.msg);
+      loadData();
+    };
+    // 密钥复制按钮
+    card.querySelectorAll('[data-copy]').forEach(btn => {
+      btn.onclick = async () => {
+        const k = a.access_keys[Number(btn.dataset.copy)];
+        try {
+          await navigator.clipboard.writeText(k.key);
+          btn.textContent = '已复制';
+          setTimeout(() => btn.textContent = '复制', 1500);
+        } catch (e) { toast('复制失败：' + e, true); }
+      };
+    });
+    grid.appendChild(card);
+  }
+  $('st-total').textContent = '¥' + fmt(total);
+  $('st-count').textContent = String(accounts.length);
+  $('st-ok').textContent = String(okN);
+  $('st-cost').textContent = '¥' + fmt(costSum);
+  $('st-time').textContent = timeStr(data.updated_at);
+}
+
+async function loadData() {
+  // 静态报表模式（report.html，由 query.py 生成，数据内嵌）
+  const emb = document.getElementById('embedded-data');
+  if (emb) {
+    try { render(JSON.parse(emb.textContent)); return; } catch (e) {}
+  }
+  try {
+    const r = await fetch('/api/data');
+    render(await r.json());
+  } catch (e) { /* 服务重启中，下轮轮询再试 */ }
+}
+
+async function post(url, body) {
+  const r = await fetch(url, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body)
+  });
+  return r.json();
+}
+
+async function refreshNow() {
+  try {
+    const r = await post('/api/refresh', {});
+    if (r.error) { toast(r.error, true); return; }
+    $('refreshing').style.display = 'block';
+    const t = setInterval(async () => {
+      try {
+        const st = await (await fetch('/api/status')).json();
+        if (!st.running) {
+          clearInterval(t);
+          $('refreshing').style.display = 'none';
+          if (st.msg) toast(st.msg);
+          loadData();
+        }
+      } catch (e) {}
+    }, 800);
+  } catch (e) { toast('刷新请求失败: ' + e, true); }
+}
+
+async function importCurl() {
+  const curl = $('curl-text').value;
+  if (!curl.trim()) { toast('请先粘贴 Copy as cURL 内容', true); return; }
+  $('btn-curl').disabled = true;
+  try {
+    const r = await post('/api/console-import', {curl, note: $('curl-note').value.trim()});
+    if (r.error) { toast(r.error, true); return; }
+    toast(r.msg);
+    $('curl-text').value = ''; $('curl-note').value = '';
+    refreshNow();
+  } finally { $('btn-curl').disabled = false; }
+}
+
+async function removeAccount(id, note) {
+  if (!confirm('删除账号「' + (note || id) + '」？仅从看板移除，不影响平台账号。')) return;
+  const r = await post('/api/accounts', {action: 'remove', id});
+  if (r.error) { toast(r.error, true); return; }
+  toast(r.msg);
+  loadData();
+}
+
+$('btn-refresh').onclick = refreshNow;
+$('btn-curl').onclick = importCurl;
+
+// 静态报表模式（report.html）：隐藏需要服务端的操作，显示快照提示
+if (document.getElementById('embedded-data')) {
+  $('btn-refresh').style.display = 'none';
+  document.querySelectorAll('.panel').forEach(p => p.style.display = 'none');
+  const tip = document.createElement('div');
+  tip.className = 'hint';
+  tip.style.marginBottom = '16px';
+  tip.innerHTML = '📄 静态快照（无需服务运行）。更新数据：双击 <b>query.bat</b> 重新查询生成。';
+  document.querySelector('.stats').before(tip);
+} else {
+  setInterval(loadData, 15000);
+}
+
+loadData();
+</script>
+</body>
+</html>

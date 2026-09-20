@@ -1,0 +1,16 @@
+# 凭据与数据文件 —— 绝不提交！
+accounts.json
+accounts.json.bak
+accounts.txt
+accounts.txt.bak
+accounts.txt.migrated
+data.json
+report.html
+console_session.log
+
+# Python
+__pycache__/
+*.pyc
+
+# 系统
+.DS_Store
