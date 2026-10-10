@@ -16,6 +16,7 @@ import json
 import os
 import sys
 import time
+import unicodedata
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
@@ -35,43 +36,92 @@ def fmt_ts(ts):
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
 
 
+def quota_text(a):
+    """额度摘要。两种套餐族都支持：
+    Token Plan(plan_family=2/3) → Credit 月池剩余；老 Coding Plan(1) → 5 小时/周 双限额。"""
+    parts = []
+    if a.get("five_hour_reset_ts"):
+        parts.append("5h剩%d%%" % round((a.get("five_hour_left_rate") or 0) * 100))
+    if a.get("weekly_reset_ts"):
+        parts.append("周剩%d%%" % round((a.get("weekly_left_rate") or 0) * 100))
+    if a.get("plan_buckets"):
+        b = next((x for x in a["plan_buckets"] if x.get("type") == 1), a["plan_buckets"][0])
+        total, left = b.get("total") or 0, b.get("residual") or 0
+        if total:
+            parts.append("月池%.0fM/%.0fM(剩%.0f%%)" % (left / 1e6, total / 1e6, left / total * 100))
+    return " ".join(parts) or "--"
+
+
+def reset_text(a):
+    ts = a.get("plan_reset_ts") or a.get("weekly_reset_ts") or a.get("five_hour_reset_ts")
+    return time.strftime("%m-%d %H:%M", time.localtime(ts)) if ts else "--"
+
+
+REAL_NAME = {1: "未实名", 2: "已实名", 3: "已注销"}
+
+# 中文是双宽字符，%s 的对齐会把表头和数据错开 —— 自己按显示宽度补齐
+_WIDE = "WF"
+
+
+def _disp_w(s):
+    return sum(2 if unicodedata.east_asian_width(ch) in _WIDE else 1 for ch in s)
+
+
+def pad(s, width, align="l"):
+    """按终端显示宽度截断 + 补齐（中文按 2 列算）。"""
+    s = "" if s is None else str(s)
+    if _disp_w(s) > width:
+        out, w = "", 0
+        for ch in s:
+            cw = 2 if unicodedata.east_asian_width(ch) in _WIDE else 1
+            if w + cw > width - 1:      # 留 1 列放省略号
+                break
+            out += ch
+            w += cw
+        s = out + "…"
+    end = max(0, width - _disp_w(s))
+    return (" " * end + s) if align == "r" else (s + " " * end)
+
+
+COLUMNS = [("备注", 12, "l"), ("手机号", 13, "l"), ("余额", 9, "r"), ("充值", 8, "r"),
+           ("API赠送", 9, "r"), ("Plan赠送", 9, "r"), ("套餐", 9, "l"), ("额度", 27, "l"),
+           ("重置", 12, "l"), ("实名", 6, "l")]
+
+
+def table_line(cells):
+    return " ".join(pad(c, w, al) for (_, w, al), c in zip(COLUMNS, cells))
+
+
 def print_table(data):
     accs = data.get("accounts") or []
+    width = sum(w for _, w, _ in COLUMNS) + len(COLUMNS) - 1
     print()
-    print("=" * 96)
+    print("=" * width)
     print("阶跃星辰多账号余额  (查询于 %s)" % fmt_ts(data.get("updated_at")))
-    print("=" * 96)
+    print("=" * width)
     if not accs:
         print("（无账号）")
         return
-    header = "%-14s %-13s %12s %10s %10s %10s  %-16s %10s" % (
-        "备注", "手机号", "余额", "充值", "API赠送", "Plan赠送", "套餐", "本月消费")
-    print(header)
-    print("-" * 96)
+    print(table_line([c[0] for c in COLUMNS]))
+    print("-" * width)
     for a in accs:
         phone = (a.get("phone") or "")
         phone = phone[:3] + "****" + phone[-4:] if len(phone) >= 7 else phone or "--"
-        plan = "--"
-        if a.get("plan_name"):
-            plan = a["plan_name"]
-            for b in a.get("plan_buckets") or []:
-                if b.get("type") == 1 and b.get("total"):
-                    used = (b["total"] or 0) - (b["residual"] or 0)
-                    plan += " 已用%.2fM/%.0fM" % (used / 1e6, b["total"] / 1e6)
-                    break
-        status = "正常" if a.get("ok") else "异常"
-        print("%-14s %-13s %12s %10s %10s %10s  %-16s %10s" % (
-            (a.get("note") or "--")[:14], phone,
+        print(table_line([
+            a.get("note") or "--", phone,
             fmt(a.get("balance")), fmt(a.get("cash")),
             fmt(a.get("voucher_api")), fmt(a.get("voucher_plan")),
-            plan[:16], fmt(a.get("cost_month"))))
+            a.get("plan_name") or "--", quota_text(a),
+            reset_text(a), REAL_NAME.get(a.get("real_name_status"), "--")]))
         for e in a.get("errors") or []:
             print("    ⚠ %s" % e)
     ok_n = sum(1 for a in accs if a.get("ok"))
     total = sum(a.get("balance") or 0 for a in accs if a.get("ok"))
     keys_n = sum(len(a.get("access_keys") or []) for a in accs)
-    print("-" * 96)
-    print("合计: %d 个账号, 成功 %d, 余额合计 ¥%.2f, 密钥 %d 个" % (len(accs), ok_n, total, keys_n))
+    cost = sum(a.get("cost_month") or 0 for a in accs if a.get("ok"))
+    print("-" * width)
+    print("合计: %d 个账号, 成功 %d, 余额合计 ¥%.2f, 本月消费 ¥%.2f, 密钥 %d 个" % (
+        len(accs), ok_n, total, cost, keys_n))
     print("报表已生成: report.html (双击即可在浏览器查看，无需服务)")
 
 

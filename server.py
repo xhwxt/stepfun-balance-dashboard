@@ -11,9 +11,11 @@
   B. 控制台内部网关（需会话 Cookie + webid，connect 协议 JSON POST）：
      https://platform.stepfun.com/api/step.openapi.devcenter.Dashboard/<Method>
        QueryAccountBalance → 余额拆分(API赠送/Step Plan)、昨日/本月/累计消费
-       GetStepPlanStatus   → 套餐名称/状态/到期/自动续费
-       QueryStepPlanUsages → Plan Credit 消耗记录
-       UserInfo            → 手机号/昵称/UID
+       GetStepPlanStatus   → 套餐名称/状态/到期/自动续费/plan_family(1=老Coding 2=Token 3=TokenV3)
+       QueryStepPlanUsages → Credit 消耗记录(日粒度，默认只回第一页，须翻页取全)
+       QueryStepPlanRateLimit → 套餐限额：plan_family=1 → 5小时滚动+周 双限额；
+                                plan_family=2/3 → Credit 月池(+加油包)；未启用那套字段为 0
+       UserInfo            → 手机号/昵称/UID/实名状态(RealNameStatus)
      拒绝 API Key（403 api key not permitted），只认会话 Cookie。
      凭据获取：控制台页面 F12 → Network → 任一 Dashboard 请求 → Copy as cURL → 粘贴导入。
 
@@ -193,6 +195,18 @@ def _fen_to_yuan(v):
     return None if n is None else round(n / 100.0, 6)
 
 
+def _int_pos(v):
+    """控制台整型字段（字符串/bigint）转 int；空、"0"、负数一律视为「未设置」→ None。
+    用于 reset_time 这类字段：老 Coding Plan 的 5 小时/周重置时间在 Token Plan 上就是 "0"。"""
+    try:
+        if v is None or v == "":
+            return None
+        n = int(v)
+        return n if n > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
 def fetch_apikey(api_key):
     """官方 /v1/accounts。返回 dict 或抛异常。"""
     req = urllib.request.Request(API_BASE + "/v1/accounts")
@@ -345,10 +359,10 @@ def console_query(entry):
     note = entry.get("note") or "?"
     rotated = False
 
-    def call(method):
+    def call(method, body=None):
         """发请求并即时合并 Set-Cookie（会话轮换自续期）。"""
         nonlocal cookie, rotated
-        st, d, sc = console_call(method, cookie, webid)
+        st, d, sc = console_call(method, cookie, webid, body)
         if sc:
             new = merge_cookie(cookie, sc)
             if new != cookie:
@@ -393,28 +407,78 @@ def console_query(entry):
         out["plan_status"] = sub.get("status")          # 1=生效
         out["plan_expire_ts"] = int(sub.get("expired_at") or 0)
         out["plan_auto_renew"] = bool(sub.get("auto_renew"))
-    st, usage = call("QueryStepPlanUsages")
-    records = (usage.get("records") or []) if isinstance(usage, dict) else []
+    # Step Plan 用量记录（QueryStepPlanUsages）：**默认只回第一页（10 条）**，
+    # 必须显式翻页，否则总额少算（实测 17 天只回 10 天，少算 3/4）。
+    records, seen, page = [], set(), 1
+    while page <= 20:
+        st, usage = call("QueryStepPlanUsages", {"page": page, "page_size": 100})
+        if not isinstance(usage, dict):
+            break
+        recs = usage.get("records") or []
+        fresh = []
+        for r in recs:
+            sig = (r.get("from_time"), r.get("to_time"), r.get("model_id"))
+            if sig not in seen:
+                seen.add(sig)
+                fresh.append(r)
+        records.extend(fresh)
+        total = int(usage.get("total") or 0)
+        if not fresh or len(records) >= total:
+            break
+        page += 1
     if records:
-        credits = sum(int(r.get("credit_consumed") or 0) for r in records)
-        calls = sum(int(r.get("calls") or 0) for r in records)
-        out["plan_credit_used"] = credits     # 今日（默认查询窗口为当天）
-        out["plan_calls"] = calls
-    # 本订阅周期 Credit 额度/剩余/重置（QueryStepPlanRateLimit）
+        # 全部页求和 = 本订阅周期累计（与月池 credit_total - credit_residual 对得上，误差 <1‰）
+        out["plan_credit_used"] = sum(int(r.get("credit_consumed") or 0) for r in records)
+        out["plan_calls"] = sum(int(r.get("calls") or 0) for r in records)
+        out["plan_usage_records"] = len(records)
+        # 用量窗口：日粒度（边界 = 北京时间 08:00 / UTC 00:00，实测），倒序第一条通常就是当天
+        win = [(_int_pos(r.get("from_time")) or 0, _int_pos(r.get("to_time")) or 0) for r in records]
+        win = [w for w in win if w[0]]
+        if win:
+            out["plan_usage_from_ts"] = min(w[0] for w in win) // 1000
+            out["plan_usage_to_ts"] = max(w[1] for w in win) // 1000
+            newest = max(w[0] for w in win)
+            now_ms = int(time.time() * 1000)
+            if newest <= now_ms < newest + 86400_000:
+                today = [r for r in records if _int_pos(r.get("from_time")) == newest]
+                out["plan_credit_today"] = sum(int(r.get("credit_consumed") or 0) for r in today)
+                out["plan_calls_today"] = sum(int(r.get("calls") or 0) for r in today)
+    # 套餐限额（QueryStepPlanRateLimit）——同一响应里带两套模型，按 plan_family 区分：
+    #   plan_family=1 PLAN_FAMILY_CODING（旧 Coding Plan）→ 5 小时滚动 + 周 双限额
+    #   plan_family=2 PLAN_FAMILY_TOKEN / 3 TOKEN_V3     → Credit 月池（+ 加油包）
+    # 未启用的那套字段是 0 / reset_time="0"，据此只展示真正生效的那套，不再写死月池。
     st, rl = call("QueryStepPlanRateLimit")
-    pc = (rl.get("plan_credit_rate_limit") or {}) if isinstance(rl, dict) else {}
-    buckets = []
-    for b in pc.get("credit_buckets") or []:
-        buckets.append({
-            "type": b.get("type"),            # 1=订阅池，其余为加油包
-            "total": _num(b.get("credit_total")),
-            "residual": _num(b.get("credit_residual")),
-            "expire_ts": int(b.get("expire_at") or 0),
-            "reset_ts": int(b.get("next_reset_at") or 0),
-        })
-    if buckets:
-        out["plan_buckets"] = buckets
-        out["plan_reset_ts"] = int(pc.get("subscription_credit_reset_time") or 0)
+    if isinstance(rl, dict):
+        out["plan_family"] = _int_pos(rl.get("plan_family"))
+        fh_reset = _int_pos(rl.get("five_hour_usage_reset_time"))
+        wk_reset = _int_pos(rl.get("weekly_usage_reset_time"))
+        fh_rate = _num(rl.get("five_hour_usage_left_rate"))
+        wk_rate = _num(rl.get("weekly_usage_left_rate"))
+        # 老 Coding Plan(1) 用这两个字段；官方 2026-10-09 站内通知说 2026-10-14 起
+        # 「Credit 额度由月限额调整为周限额」，新套餐预计也走 weekly_usage_*（枚举里已有
+        # plan_family=3 TOKEN_V3）。所以只要任一侧有值（重置时间或非零比例）就取回，
+        # 不按 family 写死 —— 真切周限时看板不用改。
+        if fh_reset or wk_reset or (fh_rate or 0) > 0 or (wk_rate or 0) > 0:
+            out["five_hour_left_rate"] = fh_rate
+            out["five_hour_reset_ts"] = fh_reset
+            out["weekly_left_rate"] = wk_rate
+            out["weekly_reset_ts"] = wk_reset
+        pc = rl.get("plan_credit_rate_limit") or {}
+        out["credit_left_rate"] = _num(pc.get("subscription_credit_left_rate"))
+        out["credit_reset_ts"] = _int_pos(pc.get("subscription_credit_reset_time"))
+        out["topup_left_rate"] = _num(pc.get("topup_credit_left_rate"))
+        buckets = []
+        for b in pc.get("credit_buckets") or []:
+            buckets.append({
+                "type": b.get("type"),            # 1=订阅池(月池)，2=加油包
+                "total": _num(b.get("credit_total")),
+                "residual": _num(b.get("credit_residual")),
+                "expire_ts": _int_pos(b.get("expire_at")),
+                "reset_ts": _int_pos(b.get("next_reset_at")),
+            })
+        if buckets:
+            out["plan_buckets"] = buckets
+            out["plan_reset_ts"] = _int_pos(pc.get("subscription_credit_reset_time"))
     # API Key 列表（返回完整 Key，本机存储，用于看板展示/复制）
     st, keys = call("ListAccessKeys")
     aks = []
@@ -439,6 +503,10 @@ def console_query(entry):
         out["uid"] = str(me.get("uid"))
         out["phone"] = me.get("mobile") or ""
         out["nickname"] = me.get("nickname") or ""
+        # RealNameStatus: 0=未指定 1=未实名 2=已实名 3=已注销实名（enum 见控制台前端 protobuf）
+        rns = _int_pos(me.get("real_name_status"))
+        if rns is not None:
+            out["real_name_status"] = rns
     return out
 
 
@@ -463,8 +531,14 @@ def fetch_one(entry, prev_balance=None):
         "plan_name": None, "plan_expire_ts": None,
         "plan_auto_renew": None, "plan_credit_used": None, "plan_calls": None,
         "plan_buckets": None, "plan_reset_ts": None,
+        "plan_family": None, "credit_left_rate": None, "credit_reset_ts": None,
+        "topup_left_rate": None,
+        "five_hour_left_rate": None, "five_hour_reset_ts": None,
+        "weekly_left_rate": None, "weekly_reset_ts": None,
+        "plan_credit_today": None, "plan_calls_today": None,
+        "plan_usage_records": None, "plan_usage_from_ts": None, "plan_usage_to_ts": None,
         "access_keys": None,
-        "uid": None, "phone": None, "nickname": None,
+        "uid": None, "phone": None, "nickname": None, "real_name_status": None,
         "prev_balance": prev_balance,
     }
     # 源 A：API Key

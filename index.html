@@ -81,6 +81,8 @@
   .badge.prepaid { background: #1d3328; color: var(--green); }
   .badge.postpaid { background: #33291d; color: var(--yellow); }
   .badge.planon { background: #1d2a44; color: #a7bcff; }
+  .badge.verified { background: #1d3328; color: var(--green); }
+  .badge.unverified { background: #33291d; color: var(--yellow); }
   .badge.fail { background: #331d1d; color: var(--red); }
   .badge.src { background: var(--panel-2); color: var(--muted); }
   .card .errmsg { font-size: 13px; color: var(--red); margin: 6px 0; word-break: break-all; }
@@ -177,6 +179,10 @@ function fmtM(v) {  // credit 原始数 → "x.xxM"
   if (v == null) return '--';
   return (v / 1e6).toLocaleString('zh-CN', {minimumFractionDigits: 2, maximumFractionDigits: 2}) + 'M';
 }
+function fmtCredit(v) {  // 不足 1M 时直接给原始 credit 数，别显示成 0.00M
+  if (v == null) return '--';
+  return v < 1e6 ? Math.round(v).toLocaleString('zh-CN') + ' credits' : fmtM(v);
+}
 
 function render(data) {
   const accounts = data.accounts || [];
@@ -211,34 +217,60 @@ function render(data) {
         <div class="cell"><div class="k">赠送总额</div><div class="v">¥${fmt(a.voucher)}</div></div>`;
     }
 
-    // Plan 套餐条 + 本周期 Credit 用量
+    // 套餐额度条：两种套餐族的字段后端都会取回，按实际拿到的渲染
+    //   ① 老 Coding Plan（plan_family=1）：5 小时滚动 + 周 双限额（剩余比例，越大越好）
+    //   ② Token Plan（plan_family=2）：Credit 月池（月度发放、月末清零）+ 加油包
+    //   ③ 2026-10-14 起的新规则：Credit 额度同样改成周限额（官方站内通知），
+    //      接口届时按哪套字段返回不可预知 —— 所以这里只用「字段有没有值」判断，不看 family。
     let planHtml = '';
     if (a.plan_name) {
       const days = a.plan_expire_ts ? Math.ceil((a.plan_expire_ts * 1000 - Date.now()) / 86400000) : null;
       const daysTxt = days != null ? (days > 0 ? `剩余 ${days} 天 · ${dateStr(a.plan_expire_ts)} 到期` : '已过期') : '';
-      let creditHtml = '';
+      const famTxt = {1: 'Coding Plan', 2: 'Token Plan', 3: 'Token Plan v3'}[a.plan_family] || '';
+      const tsTxt = ts => ts ? timeStr(ts).slice(0, 11) : '';
+      let rows = '';
+      // ① 5 小时 / 周 限额
+      const winRow = (label, rate, resetTs) => {
+        const known = rate != null;
+        const left = known ? Math.max(0, Math.min(100, Math.round(rate * 100))) : 0;
+        const color = !known ? 'var(--muted)' : (left <= 10 ? 'var(--red)' : (left <= 30 ? 'var(--yellow)' : 'var(--green)'));
+        const bar = known ? `<div style="height:6px;background:#141821;border-radius:3px;margin:4px 0;overflow:hidden"><div style="height:100%;width:${left}%;background:${color};border-radius:3px"></div></div>` : '';
+        return `<div style="margin-top:6px">${bar}<div style="display:flex;justify-content:space-between"><span>${label}剩余 <b style="color:${color}">${known ? left + '%' : '--'}</b></span><span style="color:var(--muted)">${resetTs ? tsTxt(resetTs) + ' 重置' : ''}</span></div></div>`;
+      };
+      if (a.five_hour_left_rate != null || a.five_hour_reset_ts) rows += winRow('5 小时', a.five_hour_left_rate, a.five_hour_reset_ts);
+      if (a.weekly_left_rate != null || a.weekly_reset_ts) rows += winRow('每周', a.weekly_left_rate, a.weekly_reset_ts);
+      // ② Credit 月池 / 加油包
       if (a.plan_buckets && a.plan_buckets.length) {
-        const rows = a.plan_buckets.map(b => {
+        rows += a.plan_buckets.map(b => {
           const total = b.total || 0, left = b.residual || 0;
           const used = total - left;
           const pct = total > 0 ? Math.round(left / total * 100) : 0;
           const usedPct = Math.min(100, total > 0 ? Math.round(used / total * 100) : 0);
-          const label = b.type === 1 ? '本周期' : '加油包';
+          const label = b.type === 2 ? '加油包' : '本周期';
           const bar = `<div style="height:6px;background:#141821;border-radius:3px;margin:4px 0;overflow:hidden"><div style="height:100%;width:${usedPct}%;background:linear-gradient(90deg,#6c8cff,#8fa7ff);border-radius:3px"></div></div>`;
-          return `<div style="margin-top:6px">${bar}<div style="display:flex;justify-content:space-between"><span>${label}已用 <b style="color:#a7bcff">${fmtM(used)}</b> / ${fmtM(total)}</span><span style="color:var(--muted)">剩 ${pct}%${b.reset_ts ? ' · ' + timeStr(b.reset_ts).slice(0, 11) + '重置' : ''}</span></div></div>`;
+          const endTxt = b.reset_ts ? tsTxt(b.reset_ts) + ' 重置' : (b.expire_ts ? tsTxt(b.expire_ts) + ' 到期' : '');
+          return `<div style="margin-top:6px">${bar}<div style="display:flex;justify-content:space-between"><span>${label}已用 <b style="color:#a7bcff">${fmtM(used)}</b> / ${fmtM(total)}</span><span style="color:var(--muted)">剩 ${pct}%${endTxt ? ' · ' + endTxt : ''}</span></div></div>`;
         }).join('');
-        creditHtml = rows;
-      } else if (a.plan_credit_used != null) {
-        creditHtml = `<span class="days">今日已用 ${(a.plan_credit_used/1e6).toFixed(2)}M credits</span>`;
+      }
+      // ③ 用量行：后端已翻全页求和 = 本订阅周期累计；当天单列（不再把首页 10 条之和当"今日"）
+      let usageTxt = '';
+      if (a.plan_credit_used != null) {
+        const parts = [`本周期已用 ${fmtCredit(a.plan_credit_used)}${a.plan_calls ? `（${a.plan_calls} 次）` : ''}`];
+        if (a.plan_credit_today != null) parts.push(`今日 ${fmtCredit(a.plan_credit_today)}`);
+        const span = (a.plan_usage_from_ts && a.plan_usage_to_ts)
+          ? ` title="统计窗口 ${dateStr(a.plan_usage_from_ts)} → ${dateStr(a.plan_usage_to_ts)}（${a.plan_usage_records} 条日记录）"` : '';
+        usageTxt = `<span class="days"${span}>${parts.join(' · ')}</span>`;
       }
       planHtml = `
         <div class="planbar" style="flex-direction:column;align-items:stretch;gap:2px">
-          <div style="display:flex;align-items:center;gap:10px">
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
             <span class="pname">☰ ${esc(a.plan_name)}</span>
+            ${famTxt ? `<span class="badge planon">${famTxt}</span>` : ''}
             <span class="days">${daysTxt}</span>
             <span class="renew">${a.plan_auto_renew ? '自动续费' : '不自动续费'}</span>
           </div>
-          ${creditHtml}
+          ${rows}
+          ${usageTxt}
         </div>`;
     }
 
@@ -266,6 +298,9 @@ function render(data) {
     const srcBadges = [];
     if (a.src_console) srcBadges.push('<span class="badge src">控制台</span>');
     if (a.src_api) srcBadges.push('<span class="badge src">API Key</span>');
+    // 实名状态（控制台 RealNameStatus：1=未实名 2=已实名 3=已注销实名）
+    const rn = {1: ['未实名', 'unverified'], 2: ['已实名', 'verified'], 3: ['实名已注销', 'unverified']}[a.real_name_status];
+    const rnBadge = rn ? `<span class="badge ${rn[1]}">${rn[0]}</span>` : '';
 
     card.innerHTML = `
       <div class="head">
@@ -284,6 +319,7 @@ function render(data) {
         ${costHtml}
         <div class="meta">
           ${a.type ? `<span class="badge ${a.type}">${a.type === 'postpaid' ? '后付费' : '预付费'}</span>` : ''}
+          ${rnBadge}
           ${srcBadges.join('')}
           <span>查询于 ${timeStr(a.checked_at)}</span>
         </div>
